@@ -1,0 +1,65 @@
+// LiDAR Zones Streaming CMS - Prisma Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model MediaAsset {
+  id          String           @id @default(cuid())
+  title       String
+  fileName    String
+  s3Key       String           @unique
+  publicUrl   String
+  mimeType    String           @default("video/mp4")
+  sizeBytes   Int
+  durationSec Float            @default(0.0)
+  resolution  String           @default("1920x1080")
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  allocations ZoneAllocation[]
+}
+
+model Zone {
+  id          String           @id @default(cuid())
+  name        String
+  zoneKey     Int              @unique // e.g. 1 for Zone 1, 2 for Zone 2
+  minX        Float            // Spatial boundaries in meters/mm
+  maxX        Float
+  minY        Float
+  maxY        Float
+  isActive    Boolean          @default(true)
+  color       String           @default("#3b82f6") // hex color representation for 2D visualizer
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  allocations ZoneAllocation[]
+}
+
+model ZoneAllocation {
+  id            String     @id @default(cuid())
+  zoneId        String?
+  zone          Zone?      @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  mediaId       String
+  media         MediaAsset @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  isIdleDefault Boolean    @default(false) // true if this media plays when no zones are triggered
+  priority      Int        @default(1)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@index([zoneId])
+  @@index([mediaId])
+}
+
+model DeviceConfig {
+  id            String   @id @default("default")
+  piHost        String   @default("192.168.1.100")
+  wsPort        Int      @default(8765)
+  debugStreamPort Int    @default(8080)
+  status        String   @default("OFFLINE") // ONLINE, DISCONNECTED, OFFLINE
+  lastHeartbeat DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
