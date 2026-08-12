@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getUploadPresignedUrl } from "@/lib/s3";
+import { getUploadPresignedUrl, getDownloadPresignedUrl } from "@/lib/s3";
 
 export async function POST(req: Request) {
   try {
@@ -13,14 +13,16 @@ export async function POST(req: Request) {
     const cleanFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
     const s3Key = `videos/${Date.now()}_${cleanFileName}`;
 
-    const presignedData = await getUploadPresignedUrl(s3Key, mimeType || "video/mp4");
+    const presignedUpload = await getUploadPresignedUrl(s3Key, mimeType || "video/mp4");
+    const presignedDownload = await getDownloadPresignedUrl(s3Key);
 
     return NextResponse.json({
       success: true,
-      uploadUrl: presignedData.uploadUrl,
+      uploadUrl: presignedUpload.uploadUrl,
       s3Key,
-      publicUrl: `https://${presignedData.bucket}.s3.${process.env.AWS_REGION || "ap-south-1"}.amazonaws.com/${s3Key}`,
-      bucket: presignedData.bucket,
+      publicUrl: presignedDownload.url || `https://${presignedUpload.bucket}.s3.${process.env.AWS_REGION || "ap-south-1"}.amazonaws.com/${s3Key}`,
+      bucket: presignedUpload.bucket,
+      isMock: presignedUpload.isMock || false,
     });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error?.message }, { status: 500 });
