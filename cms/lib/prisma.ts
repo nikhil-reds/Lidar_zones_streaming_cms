@@ -6,12 +6,13 @@ const connectionString =
   process.env.DATABASE_URL ||
   "postgresql://postgres:password@localhost:5432/mydb?schema=public";
 
-// Configure PG Pool with short connection timeout and background error handler
+// Configure PG Pool with SSL support & generous timeout for Neon Cloud PostgreSQL
 const pool = new pg.Pool({
   connectionString,
-  connectionTimeoutMillis: 1500,
-  idleTimeoutMillis: 5000,
-  max: 5,
+  ssl: { rejectUnauthorized: false },
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000,
+  max: 10,
 });
 
 pool.on("error", (err) => {
@@ -35,7 +36,7 @@ export const prisma =
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 /**
- * Execute Prisma query safely with connection timeout & mock fallback when DB is offline.
+ * Execute Prisma query safely with connection timeout & fallback when DB is offline.
  */
 export async function safePrismaQuery(
   queryFn: () => Promise<any>,
@@ -43,7 +44,7 @@ export async function safePrismaQuery(
 ): Promise<{ data: any; source: "database" | "mock" }> {
   try {
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Database connection timeout")), 1200)
+      setTimeout(() => reject(new Error("Database connection timeout")), 10000)
     );
     const result = await Promise.race([queryFn(), timeoutPromise]);
     if (result === null || result === undefined) {
