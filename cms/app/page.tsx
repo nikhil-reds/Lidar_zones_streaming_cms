@@ -37,7 +37,7 @@ export default function LidarCMSDashboard() {
   const [telemetryLogs, setTelemetryLogs] = useState<
     Array<{ id: number; timestamp: string; event: string; type: "trigger" | "idle" | "info" }>
   >([
-    { id: 1, timestamp: new Date().toLocaleTimeString(), event: "System initialized - Connected to CMS APIs", type: "info" },
+    { id: 1, timestamp: "--:--:--", event: "System initialized - Connected to CMS APIs", type: "info" },
   ]);
 
   // Interactive 2D Canvas tracker state
@@ -57,8 +57,15 @@ export default function LidarCMSDashboard() {
     color: "#ec4899",
   });
 
-  // Fetch initial data safely from APIs on load
   useEffect(() => {
+    setTelemetryLogs((prev) =>
+      prev.map((log) =>
+        log.id === 1 && log.timestamp === "--:--:--"
+          ? { ...log, timestamp: new Date().toLocaleTimeString() }
+          : log
+      )
+    );
+
     async function loadData() {
       const safeFetch = async (url: string) => {
         try {
@@ -530,7 +537,7 @@ export default function LidarCMSDashboard() {
                   <tbody className="divide-y divide-slate-800/60">
                     {telemetryLogs.map((log) => (
                       <tr key={log.id} className="hover:bg-slate-900/40 transition-colors">
-                        <td className="p-3 text-slate-400">{log.timestamp}</td>
+                        <td className="p-3 text-slate-400" suppressHydrationWarning>{log.timestamp}</td>
                         <td className="p-3 text-cyan-400">Raspberry Pi (ws_client)</td>
                         <td className="p-3 font-semibold text-slate-200">{log.event}</td>
                         <td className="p-3">
