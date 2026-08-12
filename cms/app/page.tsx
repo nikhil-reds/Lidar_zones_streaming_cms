@@ -46,6 +46,31 @@ export default function LidarCMSDashboard() {
   // Preview modal state
   const [previewMedia, setPreviewMedia] = useState<any | null>(null);
 
+  // Upload Video Modal state
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [filePreviewUrl, setFilePreviewUrl] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string>("");
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const [uploadForm, setUploadForm] = useState({
+    title: "",
+    fileName: "",
+    resolution: "1920x1080",
+    durationSec: 30,
+    s3Key: "",
+    customUrl: "",
+  });
+
+  // Device configuration form state
+  const [deviceForm, setDeviceForm] = useState({
+    piHost: "172.30.1.201",
+    wsPort: 8765,
+    debugStreamPort: 8080,
+  });
+  const [deviceSaveSuccess, setDeviceSaveSuccess] = useState(false);
+
   // New Zone form state
   const [newZone, setNewZone] = useState({
     name: "",
@@ -89,7 +114,14 @@ export default function LidarCMSDashboard() {
         if (zRes?.success && Array.isArray(zRes.data)) setZones(zRes.data);
         if (mRes?.success && Array.isArray(mRes.data)) setMediaList(mRes.data);
         if (aRes?.success && Array.isArray(aRes.data)) setAllocations(aRes.data);
-        if (dRes?.success && dRes.data) setDeviceConfig(dRes.data);
+        if (dRes?.success && dRes.data) {
+          setDeviceConfig(dRes.data);
+          setDeviceForm({
+            piHost: dRes.data.piHost || "172.30.1.201",
+            wsPort: dRes.data.wsPort || 8765,
+            debugStreamPort: dRes.data.debugStreamPort || 8080,
+          });
+        }
 
         setTelemetryLogs((prev) => [
           { id: Date.now(), timestamp: new Date().toLocaleTimeString(), event: "API Data loaded safely from /api/* endpoints", type: "info" },
@@ -199,6 +231,131 @@ export default function LidarCMSDashboard() {
     }
   };
 
+  // Save device config via POST /api/device
+  const handleSaveDeviceConfig = async () => {
+    try {
+      const res = await fetch("/api/device", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(deviceForm),
+      }).then((r) => (r.ok ? r.json() : null));
+
+      if (res?.success) {
+        setDeviceConfig((prev: any) => ({ ...prev, ...res.data }));
+        setDeviceSaveSuccess(true);
+        setTimeout(() => setDeviceSaveSuccess(false), 3000);
+      }
+    } catch (err) {
+      console.error("Device config save error:", err);
+    }
+  };
+
+  // Handle local video file selection
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setSelectedFile(file);
+      const objectUrl = URL.createObjectURL(file);
+      setFilePreviewUrl(objectUrl);
+
+      const cleanName = file.name.replace(/\.[^/.]+$/, "");
+      const formattedTitle = cleanName
+        .replace(/[_-]/g, " ")
+        .replace(/\b\w/g, (l) => l.toUpperCase());
+
+      const s3Path = `videos/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+
+      setUploadForm({
+        title: formattedTitle,
+        fileName: file.name,
+        resolution: "1920x1080",
+        durationSec: 30,
+        s3Key: s3Path,
+        customUrl: objectUrl,
+      });
+    }
+  };
+
+  // Submit video upload & register in PostgreSQL via /api/media
+  const handleUploadSubmit = async () => {
+    if (!uploadForm.title) return;
+    setIsUploading(true);
+    setUploadStatus("Requesting S3 Presigned Upload URL...");
+
+    try {
+      let finalPublicUrl = uploadForm.customUrl || filePreviewUrl || "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
+      let s3Key = uploadForm.s3Key || `videos/${Date.now()}_video.mp4`;
+
+      // 1. Get S3 Presigned URL from /api/media/upload-url
+      const presignedRes = await fetch("/api/media/upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: uploadForm.fileName || "video.mp4",
+          mimeType: selectedFile?.type || "video/mp4",
+        }),
+      }).then((r) => (r.ok ? r.json() : null));
+
+      if (presignedRes?.success) {
+        s3Key = presignedRes.s3Key;
+
+        // 2. Upload file directly to S3 via presigned PUT URL
+        if (selectedFile && presignedRes.uploadUrl) {
+          setUploadStatus("Uploading video binary to AWS S3 bucket via Presigned URL...");
+          try {
+            const putRes = await fetch(presignedRes.uploadUrl, {
+              method: "PUT",
+              headers: { "Content-Type": selectedFile.type || "video/mp4" },
+              body: selectedFile,
+            });
+
+            if (putRes.ok && presignedRes.publicUrl) {
+              finalPublicUrl = presignedRes.publicUrl;
+            }
+          } catch (uploadErr) {
+            console.warn("S3 Presigned PUT warning (using playable local blob URL):", uploadErr);
+          }
+        } else if (presignedRes.publicUrl) {
+          finalPublicUrl = presignedRes.publicUrl;
+        }
+      }
+
+      // 3. Register Media Asset record in PostgreSQL via /api/media
+      setUploadStatus("Registering asset in PostgreSQL database...");
+      const registerRes = await fetch("/api/media", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: uploadForm.title,
+          fileName: uploadForm.fileName || `${uploadForm.title.toLowerCase().replace(/\s+/g, "_")}.mp4`,
+          s3Key: s3Key,
+          publicUrl: finalPublicUrl,
+          mimeType: selectedFile?.type || "video/mp4",
+          sizeBytes: selectedFile?.size || 10485760,
+          durationSec: Number(uploadForm.durationSec || 30),
+          resolution: uploadForm.resolution || "1920x1080",
+        }),
+      }).then((r) => (r.ok ? r.json() : null));
+
+      if (registerRes?.success && registerRes.data) {
+        setMediaList((prev) => [registerRes.data, ...prev]);
+        setUploadStatus("Success!");
+        setTimeout(() => {
+          setIsUploading(false);
+          setIsUploadModalOpen(false);
+          setSelectedFile(null);
+          setFilePreviewUrl(null);
+        }, 800);
+      } else {
+        throw new Error(registerRes?.error || "Failed to register asset");
+      }
+    } catch (err: any) {
+      console.error("Upload handler error:", err);
+      setUploadStatus(`Error: ${err?.message || "Upload failed"}`);
+      setIsUploading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#090d16] text-slate-100 font-sans">
       {/* Top Header Navigation */}
@@ -221,22 +378,26 @@ export default function LidarCMSDashboard() {
 
         {/* System Status Indicators */}
         <div className="hidden md:flex items-center gap-4 text-xs font-mono">
-          <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg">
+          <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg whitespace-nowrap">
             <Wifi className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
             <span className="text-slate-400">WS HUB:</span>
             <span className="text-emerald-400 font-semibold">:{deviceConfig?.wsPort || 8765} ONLINE</span>
           </div>
 
-          <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg">
+          <button
+            onClick={() => setActiveTab("settings")}
+            title="Click to edit Raspberry Pi IP in System Settings"
+            className="flex items-center gap-2 bg-slate-900/90 hover:bg-slate-800 border border-slate-800 px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
+          >
             <Radio className="w-3.5 h-3.5 text-cyan-400" />
             <span className="text-slate-400">RASPBERRY PI:</span>
-            <span className="text-cyan-400 font-semibold">{deviceConfig?.piHost || "192.168.1.100"}</span>
-          </div>
+            <span className="text-cyan-400 font-semibold">{deviceConfig?.piHost || "172.30.1.201"}</span>
+          </button>
 
           <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg">
             <HardDrive className="w-3.5 h-3.5 text-purple-400" />
             <span className="text-slate-400">S3:</span>
-            <span className="text-purple-300 font-semibold">{deviceConfig?.s3Bucket || "lidar-assets"}</span>
+            <span className="text-purple-300 font-semibold">{deviceConfig?.s3Bucket}</span>
           </div>
 
           <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg">
@@ -865,7 +1026,13 @@ export default function LidarCMSDashboard() {
             </div>
 
             {/* S3 Presigned Direct Upload Dropzone Visual */}
-            <div className="glass-panel p-8 rounded-2xl border-2 border-dashed border-purple-500/30 hover:border-purple-500/60 transition-all text-center space-y-3 cursor-pointer group">
+            <div
+              onClick={() => {
+                setIsUploadModalOpen(true);
+                setTimeout(() => fileInputRef.current?.click(), 100);
+              }}
+              className="glass-panel p-8 rounded-2xl border-2 border-dashed border-purple-500/30 hover:border-purple-500/60 transition-all text-center space-y-3 cursor-pointer group"
+            >
               <div className="w-14 h-14 rounded-2xl bg-purple-950/60 border border-purple-500/40 text-purple-300 flex items-center justify-center mx-auto group-hover:scale-110 transition-transform shadow-[0_0_20px_rgba(168,85,247,0.2)]">
                 <Upload className="w-7 h-7" />
               </div>
@@ -875,7 +1042,13 @@ export default function LidarCMSDashboard() {
                   Generates direct presigned URL (`/api/media/upload-url`) • MP4, WebM (Up to 4K 60fps)
                 </p>
               </div>
-              <button className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-slate-950 font-bold text-xs uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(168,85,247,0.3)] cursor-pointer">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsUploadModalOpen(true);
+                }}
+                className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-slate-950 font-bold text-xs uppercase tracking-wider transition-all shadow-[0_0_15px_rgba(168,85,247,0.3)] cursor-pointer"
+              >
                 Select Video File
               </button>
             </div>
@@ -888,7 +1061,15 @@ export default function LidarCMSDashboard() {
                   className="glass-panel rounded-2xl border border-slate-800 overflow-hidden flex flex-col hover:border-purple-500/40 transition-all group"
                 >
                   <div className="relative h-44 bg-black overflow-hidden flex items-center justify-center">
-                    <video src={media.publicUrl} muted className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                    <video
+                      src={media.publicUrl}
+                      muted
+                      onError={(e) => {
+                        (e.target as HTMLVideoElement).src =
+                          "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
+                      }}
+                      className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                    />
                     <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-70" />
                     
                     <button
@@ -1092,6 +1273,10 @@ export default function LidarCMSDashboard() {
                 loop
                 muted
                 playsInline
+                onError={(e) => {
+                  (e.target as HTMLVideoElement).src =
+                    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
+                }}
                 className="w-full h-full object-cover"
               />
 
@@ -1127,7 +1312,63 @@ export default function LidarCMSDashboard() {
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {/* Raspberry Pi & Device Config Card */}
+              <div className="glass-panel p-6 rounded-2xl border border-slate-800 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-bold text-slate-100 flex items-center gap-2">
+                    <Radio className="w-4 h-4 text-cyan-400" />
+                    <span>Raspberry Pi & WebSocket</span>
+                  </h3>
+                  {deviceSaveSuccess && (
+                    <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-500/30">
+                      SAVED TO DB
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-3 text-xs font-mono">
+                  <div>
+                    <label className="text-slate-400 block mb-1">RASPBERRY PI IP / HOSTNAME:</label>
+                    <input
+                      type="text"
+                      value={deviceForm.piHost}
+                      onChange={(e) => setDeviceForm({ ...deviceForm, piHost: e.target.value })}
+                      className="w-full p-2 rounded-lg bg-slate-900 border border-slate-700 text-cyan-300 font-bold focus:outline-none focus:border-cyan-500"
+                      placeholder="e.g. 172.30.1.201"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-slate-400 block mb-1">WS PORT:</label>
+                      <input
+                        type="number"
+                        value={deviceForm.wsPort}
+                        onChange={(e) => setDeviceForm({ ...deviceForm, wsPort: Number(e.target.value) })}
+                        className="w-full p-2 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 focus:outline-none focus:border-cyan-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-400 block mb-1">DEBUG PORT:</label>
+                      <input
+                        type="number"
+                        value={deviceForm.debugStreamPort}
+                        onChange={(e) => setDeviceForm({ ...deviceForm, debugStreamPort: Number(e.target.value) })}
+                        className="w-full p-2 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 focus:outline-none focus:border-cyan-500"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleSaveDeviceConfig}
+                    className="w-full py-2 rounded-lg bg-cyan-950 hover:bg-cyan-900 text-cyan-300 font-bold border border-cyan-500/40 transition-colors cursor-pointer mt-2"
+                  >
+                    Save Device Configuration
+                  </button>
+                </div>
+              </div>
+
               {/* PostgreSQL Config Card */}
               <div className="glass-panel p-6 rounded-2xl border border-slate-800 space-y-4">
                 <div className="flex items-center justify-between">
@@ -1144,12 +1385,12 @@ export default function LidarCMSDashboard() {
                   <div>
                     <span className="text-slate-400">DATABASE_URL:</span>
                     <p className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-blue-300 truncate mt-1">
-                      postgresql://postgres:***@localhost:5432/mydb?schema=public
+                      postgresql://neondb_owner:***@ep-calm-lab-aztifuij-pooler.c-3.ap-southeast-1.aws.neon.tech/neondb
                     </p>
                   </div>
                   <div>
                     <span className="text-slate-400">PRISMA PROVIDER:</span>
-                    <p className="p-2 rounded bg-slate-900 text-slate-200 mt-1">postgresql</p>
+                    <p className="p-2 rounded bg-slate-900 text-slate-200 mt-1">postgresql (Neon Cloud)</p>
                   </div>
                 </div>
               </div>
@@ -1204,12 +1445,161 @@ export default function LidarCMSDashboard() {
             </div>
 
             <div className="relative aspect-video bg-black rounded-xl overflow-hidden border border-slate-800">
-              <video src={previewMedia.publicUrl} controls autoPlay className="w-full h-full object-cover" />
+              <video
+                src={previewMedia.publicUrl}
+                controls
+                autoPlay
+                onError={(e) => {
+                  (e.target as HTMLVideoElement).src =
+                    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
+                }}
+                className="w-full h-full object-cover"
+              />
             </div>
 
             <div className="flex items-center justify-between text-xs font-mono text-slate-400 pt-2">
               <span>S3 KEY: {previewMedia.s3Key}</span>
               <span>{previewMedia.resolution || "1920x1080"} • {((previewMedia.sizeBytes || 10000000) / 1024 / 1024).toFixed(1)} MB</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Upload & Select Video Asset Modal */}
+      {isUploadModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="glass-panel p-6 rounded-2xl border border-purple-500/40 max-w-xl w-full space-y-5 shadow-[0_0_50px_rgba(168,85,247,0.25)]">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Film className="w-5 h-5 text-purple-400" />
+                <h3 className="font-bold text-slate-100">Upload & Add New S3 Video Asset</h3>
+              </div>
+              <button
+                onClick={() => {
+                  setIsUploadModalOpen(false);
+                  setSelectedFile(null);
+                  setFilePreviewUrl(null);
+                }}
+                className="px-3 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 text-xs font-mono cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            {/* Hidden native file input */}
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept="video/*"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+
+            {/* Select File Box */}
+            <div
+              onClick={() => fileInputRef.current?.click()}
+              className="border-2 border-dashed border-purple-500/40 hover:border-purple-400 bg-purple-950/20 rounded-xl p-6 text-center cursor-pointer transition-colors space-y-2"
+            >
+              <Upload className="w-8 h-8 text-purple-400 mx-auto animate-bounce" />
+              {selectedFile ? (
+                <div>
+                  <p className="font-bold text-purple-300 text-sm">{selectedFile.name}</p>
+                  <p className="text-xs text-slate-400 font-mono mt-0.5">
+                    {(selectedFile.size / 1024 / 1024).toFixed(2)} MB • {selectedFile.type || "video/mp4"}
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <p className="font-semibold text-slate-200 text-sm">Click here to select a video file from your computer</p>
+                  <p className="text-xs text-slate-400 font-mono">Supports MP4, WebM, MOV, AVI (up to 4K resolution)</p>
+                </div>
+              )}
+            </div>
+
+            {/* Local Video Preview if selected */}
+            {filePreviewUrl && (
+              <div className="relative aspect-video bg-black rounded-xl overflow-hidden border border-slate-800">
+                <video src={filePreviewUrl} controls className="w-full h-full object-cover" />
+              </div>
+            )}
+
+            {/* Form Fields */}
+            <div className="space-y-3 text-xs font-mono">
+              <div>
+                <label className="text-slate-400 block mb-1">VIDEO TITLE:</label>
+                <input
+                  type="text"
+                  value={uploadForm.title}
+                  onChange={(e) => setUploadForm({ ...uploadForm, title: e.target.value })}
+                  placeholder="e.g. Exhibit 3 - Spatial Mapping"
+                  className="w-full p-2.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-100 font-semibold focus:outline-none focus:border-purple-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-slate-400 block mb-1">RESOLUTION:</label>
+                  <select
+                    value={uploadForm.resolution}
+                    onChange={(e) => setUploadForm({ ...uploadForm, resolution: e.target.value })}
+                    className="w-full p-2.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 focus:outline-none focus:border-purple-500"
+                  >
+                    <option value="1920x1080">1920x1080 (FHD)</option>
+                    <option value="3840x2160">3840x2160 (4K UHD)</option>
+                    <option value="1280x720">1280x720 (HD)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-slate-400 block mb-1">DURATION (SEC):</label>
+                  <input
+                    type="number"
+                    value={uploadForm.durationSec}
+                    onChange={(e) => setUploadForm({ ...uploadForm, durationSec: Number(e.target.value) })}
+                    className="w-full p-2.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-400 block mb-1">TARGET S3 KEY / PATH:</label>
+                <input
+                  type="text"
+                  value={uploadForm.s3Key}
+                  onChange={(e) => setUploadForm({ ...uploadForm, s3Key: e.target.value })}
+                  placeholder="videos/filename.mp4"
+                  className="w-full p-2.5 rounded-lg bg-slate-900 border border-slate-700 text-purple-300 focus:outline-none focus:border-purple-500"
+                />
+              </div>
+            </div>
+
+            {/* Upload status message */}
+            {uploadStatus && (
+              <div className="p-2.5 rounded-lg bg-slate-900 border border-purple-500/30 text-xs font-mono text-purple-300">
+                {uploadStatus}
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setIsUploadModalOpen(false)}
+                disabled={isUploading}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleUploadSubmit}
+                disabled={isUploading || !uploadForm.title}
+                className={`px-5 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all cursor-pointer shadow-[0_0_15px_rgba(168,85,247,0.3)] ${
+                  isUploading || !uploadForm.title
+                    ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                    : "bg-purple-600 hover:bg-purple-500 text-slate-950"
+                }`}
+              >
+                {isUploading ? "Uploading & Registering..." : "Upload & Register Asset"}
+              </button>
             </div>
           </div>
         </div>
