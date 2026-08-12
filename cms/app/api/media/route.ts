@@ -46,7 +46,7 @@ export async function GET() {
     () => prisma.mediaAsset.findMany({ orderBy: { createdAt: "desc" } }),
     MOCK_MEDIA
   );
-  const data = result.data && result.data.length > 0 ? result.data : MOCK_MEDIA;
+  const data = result.data !== null && result.data !== undefined ? result.data : MOCK_MEDIA;
   return NextResponse.json({ success: true, data, source: result.source });
 }
 
