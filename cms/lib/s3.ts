@@ -25,10 +25,27 @@ export async function getUploadPresignedUrl(s3Key: string, contentType: string =
     const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
     return { success: true, uploadUrl: url, s3Key, bucket: bucketName };
   } catch (error: any) {
-    console.error("S3 Presigned URL Error:", error);
-    // Return mock upload URL if AWS credentials fail in local dev mode
+    console.error("S3 Presigned Upload URL Error:", error);
     const publicUrl = `https://${bucketName}.s3.${region}.amazonaws.com/${s3Key}`;
     return { success: true, uploadUrl: publicUrl, s3Key, bucket: bucketName, isMock: true };
+  }
+}
+
+/**
+ * Generate AWS S3 Presigned Download/Stream GET URL for browser playback.
+ */
+export async function getDownloadPresignedUrl(s3Key: string) {
+  try {
+    const command = new GetObjectCommand({
+      Bucket: bucketName,
+      Key: s3Key,
+    });
+    const url = await getSignedUrl(s3Client, command, { expiresIn: 86400 }); // 24 Hours
+    return { success: true, url, s3Key, bucket: bucketName };
+  } catch (error: any) {
+    console.error("S3 Presigned Download URL Error:", error);
+    const publicUrl = `https://${bucketName}.s3.${region}.amazonaws.com/${s3Key}`;
+    return { success: false, url: publicUrl, s3Key, bucket: bucketName };
   }
 }
 
