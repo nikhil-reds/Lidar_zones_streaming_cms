@@ -32,7 +32,7 @@ export async function GET() {
     () => prisma.zone.findMany({ orderBy: { zoneKey: "asc" } }),
     MOCK_ZONES
   );
-  const data = result.data && result.data.length > 0 ? result.data : MOCK_ZONES;
+  const data = result.data !== null && result.data !== undefined ? result.data : MOCK_ZONES;
   return NextResponse.json({ success: true, data, source: result.source });
 }
 
