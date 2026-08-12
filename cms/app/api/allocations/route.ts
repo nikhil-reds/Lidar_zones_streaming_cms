@@ -39,7 +39,7 @@ export async function GET() {
       }),
     MOCK_ALLOCATIONS
   );
-  const data = result.data && result.data.length > 0 ? result.data : MOCK_ALLOCATIONS;
+  const data = result.data !== null && result.data !== undefined ? result.data : MOCK_ALLOCATIONS;
   return NextResponse.json({ success: true, data, source: result.source });
 }
 
